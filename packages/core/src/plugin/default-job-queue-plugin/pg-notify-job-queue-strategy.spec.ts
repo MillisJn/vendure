@@ -47,6 +47,7 @@ describe('PgNotifyJobQueueStrategy', () => {
     });
 
     afterEach(() => {
+        vi.useRealTimers();
         strategy.destroy();
         vi.restoreAllMocks();
     });
@@ -181,13 +182,15 @@ describe('PgNotifyJobQueueStrategy', () => {
             job.fail(new Error('boom'));
             expect(job.state).toBe('RETRYING');
 
+            vi.useFakeTimers();
             await strategy.update(job);
-            const pending = strategy.next('video');
+            void strategy.next('video');
 
-            expect(await settledWithin(pending, 50)).toBe('parked');
+            await vi.advanceTimersByTimeAsync(99);
             expect(next).toHaveBeenCalledTimes(1);
-            await settledWithin(pending, 200);
+            await vi.advanceTimersByTimeAsync(2);
             expect(next).toHaveBeenCalledTimes(2);
+            vi.useRealTimers();
         });
 
         it('releases an already-parked next() when a retry is recorded, so it re-parks with the shorter timeout', async () => {
@@ -196,8 +199,10 @@ describe('PgNotifyJobQueueStrategy', () => {
             vi.spyOn(SqlJobQueueStrategy.prototype, 'update').mockResolvedValue(undefined);
             const next = vi.spyOn(SqlJobQueueStrategy.prototype, 'next').mockResolvedValue(undefined);
             initPostgres();
-            const pending = strategy.next('video');
-            expect(await settledWithin(pending, 20)).toBe('parked');
+            vi.useFakeTimers();
+            void strategy.next('video');
+            await vi.advanceTimersByTimeAsync(10);
+            expect(next).toHaveBeenCalledTimes(1);
 
             // Another concurrency slot's job fails while this one is parked.
             const job = new Job({ id: 1, queueName: 'video', data: {}, retries: 1 });
@@ -206,10 +211,13 @@ describe('PgNotifyJobQueueStrategy', () => {
             await strategy.update(job);
 
             // Released immediately, then woken again once the 100ms backoff is due.
-            await settledWithin(pending, 20);
+            await vi.advanceTimersByTimeAsync(0);
             expect(next).toHaveBeenCalledTimes(2);
-            await settledWithin(pending, 200);
+            await vi.advanceTimersByTimeAsync(99);
+            expect(next).toHaveBeenCalledTimes(2);
+            await vi.advanceTimersByTimeAsync(2);
             expect(next).toHaveBeenCalledTimes(3);
+            vi.useRealTimers();
         });
 
         it('parks again when a wake-up finds no job, so ActiveQueue does not back off', async () => {
