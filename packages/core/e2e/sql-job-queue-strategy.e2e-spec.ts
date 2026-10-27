@@ -1,15 +1,19 @@
+import { ModuleRef } from '@nestjs/core';
 import { JobState } from '@vendure/common/lib/generated-types';
 import {
     ConfigService,
     DefaultJobQueuePlugin,
+    Injector,
+    Job,
     mergeConfig,
     PollingJobQueueStrategy,
+    PollingJobQueueStrategyConfig,
     TransactionalConnection,
 } from '@vendure/core';
 import { createTestEnvironment } from '@vendure/testing';
 import path from 'path';
 import { DataSource, EntitySubscriberInterface } from 'typeorm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { initialData } from '../../../e2e-common/e2e-initial-data';
 import { TEST_SETUP_TIMEOUT_MS, testConfig } from '../../../e2e-common/test-config';
@@ -297,6 +301,40 @@ describe('SqlJobQueueStrategy next()', () => {
             }
             expect(ids.length).toBe(jobCount);
             expect(new Set(ids).size).toBe(jobCount);
+        });
+    });
+
+    describe('with maxIdlePollInterval', () => {
+        it('queries an idle queue less often, and still picks up a job', async () => {
+            const queueName = 'test-idle-backoff';
+            const StrategyClass = strategy.constructor as new (
+                config: PollingJobQueueStrategyConfig,
+            ) => PollingJobQueueStrategy;
+            const backoffStrategy = new StrategyClass({
+                pollInterval: 50,
+                maxIdlePollInterval: 400,
+                gracefulShutdownTimeout: 1_000,
+            });
+            backoffStrategy.init(new Injector(server.app.get(ModuleRef)));
+            const next = vi.spyOn(backoffStrategy, 'next');
+            const processed: string[] = [];
+            const process = (job: Job<{ tag: string }>) => {
+                processed.push(job.data.tag);
+                return Promise.resolve();
+            };
+            await backoffStrategy.start(queueName, process);
+            try {
+                await new Promise(resolve => setTimeout(resolve, 2_000));
+                // Polling every 50ms would be about 40 queries. Backing off to 100, 200 and
+                // then 400ms is about 7.
+                expect(next.mock.calls.length).toBeLessThan(15);
+
+                await insertJobs([{ queueName, state: JobState.PENDING, tag: 'after-idle' }]);
+                await pollUntil(() => processed.includes('after-idle'), { timeout: 2_000 });
+            } finally {
+                await backoffStrategy.stop(queueName, process);
+                backoffStrategy.destroy();
+            }
         });
     });
 });
